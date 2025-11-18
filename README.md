@@ -150,4 +150,13 @@ The only required argument is \--path to your DIV2K HR folder.
 
 ### **Basic Training Command**
 
-python train\_full.py \--path /path/to/your/DIV2K\_train\_HR  
+python train\_full.py \--path /path/to/your/DIV2K\_train\_HR 
+
+### **Advanced traning command**
+
+python train_full.py \
+    --path /home/gxk384/GaussianImage/DIV2K_train_HR \
+    --epochs 1 \
+    --batch_size 1 \
+    --lr 5e-5 \
+    --num_workers 4
