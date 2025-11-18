@@ -79,3 +79,75 @@ If you are interested in the following work, please cite the following paper.
   year={2025}
 }
 ```
+
+# **ContinuousSR Model Training**
+
+This document provides instructions for training the ContinuousSR (Pixel-to-Gaussian) model using the provided Python scripts.
+
+The main script, train\_full\_project.py (or train\_full.py), is configured to automatically use the correct model backbones and data wrappers for arbitrary-scale super-resolution (ASSR).
+
+## **1\. Project Structure**
+
+Please ensure your project is organized as follows for all imports to work correctly:
+
+/your\_project\_folder  
+|  
+|-- train\_full.py           \<-- The main training script  
+|-- gaussian.py             \<-- The core ContinuousGaussian model file  
+|-- utils.py                \<-- Shared utility functions  
+|  
+|-- models/                 \<-- Python package containing all model backbones  
+|   |-- \_\_init\_\_.py         \<-- Registers all models (edsr, mlp, etc.)  
+|   |-- models.py  
+|   |-- edsr.py  
+|   |-- rdn.py  
+|   |-- swinir.py  
+|   |-- hat.py  
+|   |-- mlp.py  
+|   |-- cnn.py  
+|   |-- unet.py  
+|  
+|-- datasets/               \<-- Python package containing all data wrappers  
+|   |-- \_\_init\_\_.py  
+|   |-- datasets.py  
+|   |-- image\_folder.py     \<-- Loads full HR images from disk  
+|   |-- wrappers.py         \<-- Handles random cropping and downsampling
+
+## **2\. Prerequisites**
+
+### **Environment Setup**
+
+You must have a Python environment with PyTorch and CUDA support.
+
+1. Install PyTorch:  
+   (Example for CUDA 11.8. Adjust to your system.)  
+   pip install torch torchvision \--index-url \[https://download.pytorch.org/whl/cu118\](https://download.pytorch.org/whl/cu118)
+
+2. Install gsplat Library:  
+   The core Gaussian Splatting model requires this CUDA-accelerated library.  
+   (Adjust cu118 and torch-2.1.0 to match your PyTorch/CUDA version.)  
+   pip install gsplat-cu118 \-f \[https://huggingface.co/quadra-kok/gsplat/whl/torch-2.1.0.html\](https://huggingface.co/quadra-kok/gsplat/whl/torch-2.1.0.html)
+
+3. Install Other Dependencies:  
+   The project requires timm, einops, imageio, scikit-image, and tensorboardX.  
+   pip install timm einops imageio scikit-image tensorboardX
+
+### **Dataset Setup**
+
+You must download the **DIV2K 800-image training set (HR)**.
+
+1. Download the dataset (e.g., from the [DIV2K homepage](https://data.vision.ee.ethz.ch/cvl/DIV2K/)).  
+2. Unzip the file (DIV2K\_train\_HR.zip) to a known location on your machine.  
+   * Example path: /home/youruser/datasets/DIV2K\_train\_HR
+
+**Note:** The training script automatically handles cropping. It uses the sr-implicit-downsampled wrapper to perform **random 256x256 HR cropping** and **random-scale downsampling** (between 4x and 8x) on-the-fly, as required for ASSR training.
+
+## **3\. How to Train**
+
+You run the training using the train\_full.py script from your terminal.
+
+The only required argument is \--path to your DIV2K HR folder.
+
+### **Basic Training Command**
+
+python train\_full.py \--path /path/to/your/DIV2K\_train\_HR  
