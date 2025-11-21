@@ -154,9 +154,13 @@ python train\_full.py \--path /path/to/your/DIV2K\_train\_HR
 
 ### **Advanced traning command**
 
+```bash
 python train_full.py \
-    --path /home/gxk384/GaussianImage/DIV2K_train_HR \
-    --epochs 1 \
-    --batch_size 1 \
+    --path /path/to/your/DIV2K_train_HR \
+    --dataset_config train-div2k.yaml \
+    --epochs 50 \
+    --batch_size 2 \
     --lr 5e-5 \
-    --num_workers 4
+    --num_workers 4 \
+    --resume /path/to/your/previous_model.pth 
+```
