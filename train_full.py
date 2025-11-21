@@ -4,69 +4,111 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import time
-import argparse # <--- Added this import
+import argparse 
 from argparse import Namespace
 import os
+import yaml 
+import pprint 
 
 # --- Import all model and utility files ---
-# This is necessary to populate the models.models registry
-# with all the @register calls.
 import models
 import utils
-
-# --- Import all dataset files ---
-# This populates the datasets.datasets registry
 import datasets
 
+# --- HARDCODED MODEL SPECIFICATION (HAT Encoder + Continuous Gaussian) ---
+# NOTE: This specification uses the HAT encoder with high-dimensional settings,
+# which is why this model is high-performing.
+HAT_GAUSSIAN_MODEL_SPEC = {
+    'name': 'continuous-gaussian',
+    'args': {
+        'cnn_spec': {
+            'args': {
+                'init_range': 0.1
+            },
+            'name': 'cnn'
+        },
+        'encoder_spec': {
+            'args': {
+                'compress_ratio': 3,
+                'conv_scale': 0.01,
+                'depths': [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+                'embed_dim': 180,
+                'img_range': 1.0,
+                'img_size': 64,
+                'in_chans': 3,
+                'mlp_ratio': 2,
+                'num_heads': [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+                'overlap_ratio': 0.5,
+                'resi_connection': '1conv',
+                'squeeze_factor': 30,
+                'upsampler': 'pixelshuffle',
+                'upscale': 4,
+                'window_size': 16
+            },
+            'name': 'hat'
+        },
+        'fc_spec': {
+            'args': {
+                'hidden_list': [256, 256, 256, 256],
+                'out_dim': 3
+            },
+            'name': 'mlp'
+        }
+    }
+}
+# --- END HARDCODED MODEL SPECIFICATION ---
+
 # --- Training Function ---
-def train_model(epochs=100, batch_size=4, lr=1e-4, div2k_hr_path=None, num_workers=8):
+def train_model(epochs, batch_size, lr, div2k_hr_path, num_workers, dataset_config_path, resume_path=None):
     
     if not torch.cuda.is_available():
         print("ERROR: CUDA is not available. This model requires a GPU.")
         return
     device = torch.device("cuda")
 
+    # 1. Use Hardcoded Model Specification
+    model_spec = HAT_GAUSSIAN_MODEL_SPEC
+    
+    print("\n--- MODEL SPECIFICATION (HAT + Gaussian) ---")
+    pprint.pprint(model_spec)
+    print("------------------------------------------\n")
+    
+    # 2. Load Dataset Specification
+    print(f"Loading dataset configuration from {dataset_config_path}...")
+    with open(dataset_config_path, 'r') as f:
+        data_config = yaml.load(f, Loader=yaml.FullLoader)
+    
+    dataset_spec = data_config['train_dataset']
+    
     # --- Data Loading ---
-    if div2k_hr_path is None or not os.path.exists(div2k_hr_path):
+    
+    # Override root_path and batch_per_gpu args using command-line input
+    final_root_path = div2k_hr_path
+    if not final_root_path:
+        final_root_path = dataset_spec['dataset']['args'].get('root_path')
+
+    dataset_spec['dataset']['args']['root_path'] = final_root_path
+    dataset_spec['wrapper']['args']['batch_per_gpu'] = batch_size
+
+    if not final_root_path or not os.path.exists(final_root_path):
         print("="*50)
         print("ERROR: DIV2K HR training path is not set or does not exist.")
-        print("Please download the DIV2K 800 training images (HR)")
-        print("and set the 'div2k_hr_path' variable in main() to its location.")
-        print(f"Path was: {div2k_hr_path}")
+        print(f"Path tried: {final_root_path}")
+        print("Please ensure '--path' is set correctly or 'root_path' in the YAML file is valid.")
         print("="*50)
         return
 
     print("Initializing dataset...")
-    # 1. Define the dataset specification
-    # This spec uses the loaders you provided to build the dataset pipeline:
-    # 'sr-implicit-downsampled' (from wrappers.py)
-    #   -> 'image-folder' (from image_folder.py)
     
-    dataset_spec = {
-        'name': 'sr-implicit-downsampled',
-        'args': {
-            'dataset': {
-                'name': 'image-folder',
-                'args': {
-                    'root_path': div2k_hr_path,
-                    'cache': 'in_memory' # Use 'in_memory' for speed if you have enough RAM
-                }
-            },
-            'inp_size': 256,       # As per paper: 256x256 HR crop
-            'scale_min': 4.0,      # As per paper
-            'scale_max': 8.0,      # As per paper
-            'augment': True,
-            'batch_per_gpu': batch_size
-        }
-    }
+    # 3. Initialize the Dataset using the nested structure
+    base_dataset = datasets.make(dataset_spec['dataset'])
+    wrapped_dataset = datasets.make(dataset_spec['wrapper'], args={'dataset': base_dataset})
     
-    # 2. Initialize the Dataset using datasets.make
-    dataset = datasets.make(dataset_spec)
-    print(f"Dataset '{div2k_hr_path}' loaded successfully.")
+    print(f"Dataset '{final_root_path}' loaded successfully.")
     
-    # 3. Initialize DataLoader
+    # 4. Initialize DataLoader
     dataloader = DataLoader(
-        dataset,
+        wrapped_dataset,
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
@@ -74,51 +116,73 @@ def train_model(epochs=100, batch_size=4, lr=1e-4, div2k_hr_path=None, num_worke
     )
 
     print("Initializing model...")
-    # 4. Define the model specification
-    # This spec tells models.make() how to build the ContinuousGaussian model
-    # and its encoder.
     
-    # Encoder spec: use 'edsr-baseline' from edsr.py
-    encoder_spec = {
-        'name': 'edsr-baseline',
-        'args': {
-            'n_resblocks': 16,
-            'n_feats': 64,
-            'res_scale': 1,
-            'no_upsampling': True,
-            'rgb_range': 1,
-        }
-    }
-    
-    # Main model spec: 'continuous-gaussian' from gaussian.py
-    # Note: The __init__ in gaussian.py also takes cnn_spec and fc_spec,
-    # but doesn't appear to use them. We pass them as empty dicts.
-    model_spec = {
-        'name': 'continuous-gaussian',
-        'args': {
-            'encoder_spec': encoder_spec,
-            'cnn_spec': {},
-            'fc_spec': {}
-        }
-    }
-
-    # 5. Initialize the Model using models.make
+    # 5. Initialize the Model using models.make and the hardcoded spec
     model = models.make(model_spec).to(device)
-    print(f"Model created. Total parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
+    print(f"Model created. Total parameters: {utils.compute_num_params(model, text=True)}")
 
-    # 6. Initialize Optimizer
+    # 6. Initialize Optimizer and Loss
     optimizer = optim.Adam(model.parameters(), lr=lr)
-    
-    # 7. Initialize Loss Function
     criterion = nn.L1Loss()
 
-    print(f"Starting training for {epochs} epochs...")
+    # --- RESUME TRAINING LOGIC ---
+    start_epoch = 0
+    if resume_path:
+        if os.path.isfile(resume_path):
+            print(f"Loading checkpoint from '{resume_path}'")
+            checkpoint = torch.load(resume_path)
+            
+            # Check if the checkpoint has the structure we expect (dict with 'model')
+            # or if it's a direct state_dict save (older versions/different scripts)
+            if 'model' in checkpoint and isinstance(checkpoint['model'], dict):
+                 # This matches the structure we save in this script: {'model': {'sd': state_dict, ...}}
+                 state_dict = checkpoint['model'].get('sd')
+                 if state_dict is None:
+                     # Maybe it's just the spec without weights? Try loading 'model' directly if it looks like weights
+                     # But based on our save logic, 'sd' should be there.
+                     print("Warning: 'sd' key not found in checkpoint['model']. Attempting to load 'model' directly.")
+                     state_dict = checkpoint['model']
+            else:
+                # Assume it's a raw state_dict
+                state_dict = checkpoint
+
+            try:
+                model.load_state_dict(state_dict)
+                print("Successfully loaded model weights.")
+                
+                # Try to parse epoch number from filename (e.g., continuous_sr_epoch_10.pth)
+                # This is a simple heuristic.
+                try:
+                    filename = os.path.basename(resume_path)
+                    if "epoch_" in filename:
+                        epoch_str = filename.split("epoch_")[1].split(".")[0]
+                        start_epoch = int(epoch_str)
+                        print(f"Resuming from epoch {start_epoch}")
+                except Exception:
+                    print("Could not determine epoch from filename. Starting from epoch 0.")
+
+            except Exception as e:
+                print(f"Error loading state_dict: {e}")
+                print("Please check if the model architecture matches the checkpoint.")
+                return
+        else:
+            print(f"Error: No checkpoint found at '{resume_path}'")
+            return
+    # -----------------------------
+
+    print(f"Starting training from epoch {start_epoch+1} to {epochs}...")
     print(f"Batch size: {batch_size}, Learning rate: {lr}")
 
     # --- Training Loop ---
     model.train()
     total_steps = 0
-    for epoch in range(epochs):
+    
+    # Create directory for saving checkpoints if it doesn't exist
+    save_dir = "checkpoints"
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+
+    for epoch in range(start_epoch, epochs):
         epoch_start_time = time.time()
         running_loss = 0.0
 
@@ -128,29 +192,23 @@ def train_model(epochs=100, batch_size=4, lr=1e-4, div2k_hr_path=None, num_worke
             # Unpack the batch dictionary from the dataset wrapper
             lr_batch = batch['inp'].to(device)
             hr_batch = batch['gt'].to(device)
-            scale_batch = batch['scale'] # This is a 1D tensor [s, s, s, ...]
-            
-            # Get the single scale value for this batch
-            # (The wrapper ensures all items in a batch have the same scale)
-            s = scale_batch[0].item()
-            
-            # Format the scale tensor as the model's forward() expects
+
+            # The scale value is randomly chosen per batch
+            # FIX: Extract the scalar value correctly
+            s = batch['scale'][0].item() 
             scale_tensor = torch.tensor([[s, s]], device=device) 
 
-            # 8. Forward Pass
+            # 7. Forward Pass
             optimizer.zero_grad()
             pred_batch = model(lr_batch, scale_tensor)
             
-            # 9. Calculate Loss
-            # Ensure predicted batch and HR batch are the same size
-            # (The loader logic should already guarantee this)
+            # 8. Calculate Loss (Shape alignment check is critical for variable scales)
             if pred_batch.shape != hr_batch.shape:
-                 # In case of rounding errors in the loader
                  pred_batch = F.interpolate(pred_batch, size=hr_batch.shape[-2:], mode='bicubic', align_corners=False)
 
             loss = criterion(pred_batch, hr_batch)
 
-            # 10. Backward Pass and Optimize
+            # 9. Backward Pass and Optimize
             loss.backward()
             optimizer.step()
 
@@ -170,22 +228,14 @@ def train_model(epochs=100, batch_size=4, lr=1e-4, div2k_hr_path=None, num_worke
         print("-" * 50)
 
         if (epoch + 1) % 10 == 0:
-            save_path = f"continuous_sr_epoch_{epoch+1}.pth"
-            # --- FIX START ---
-            # 'demo.py' expects a dictionary with a 'model' key.
-            # That 'model' key should contain the model_spec (architecture).
-            # The 'models.make' function also expects the weights to be
-            # inside that spec at the key 'sd'.
+            save_path = os.path.join(save_dir, f"continuous_sr_epoch_{epoch+1}.pth")
             
-            # 1. Add the learned weights (state_dict) into the model_spec dict
-            model_spec['sd'] = model.state_dict()
-            
-            # 2. Save the checkpoint in the format demo.py expects
-            checkpoint = {
-                'model': model_spec
-            }
+            # Save checkpoint in the format demo.py expects: { 'model': { model_spec, 'sd': weights } }
+            temp_model_spec = HAT_GAUSSIAN_MODEL_SPEC.copy()
+            temp_model_spec['sd'] = model.state_dict()
+            checkpoint = {'model': temp_model_spec}
             torch.save(checkpoint, save_path)
-            # --- FIX END ---
+            
             print(f"Model checkpoint saved to {save_path}")
 
     print("Training complete.")
@@ -205,12 +255,19 @@ if __name__ == "__main__":
     parser.add_argument('--lr', type=float, default=1e-4, 
                         help='Learning rate. (Default: 1e-4)')
                         
-    parser.add_argument('--path', type=str, required=True, 
-                        help='Path to the DIV2K HR training images folder (e.g., /path/to/DIV2K_train_HR)')
+    parser.add_argument('--path', type=str, required=False, 
+                        help='Path to the DIV2K HR training images folder (e.g., /path/to/DIV2K_train_HR). If not provided, path from YAML is used.')
                         
     parser.add_argument('--num_workers', type=int, default=8, 
                         help='Number of dataloader workers. (Default: 8)')
+    
+    parser.add_argument('--dataset_config', type=str, default='train-div2k.yaml',
+                        help='Path to the dataset configuration YAML file (e.g., train-div2k.yaml).')
 
+    # Added argument for resuming training
+    parser.add_argument('--resume', type=str, default=None, required=False,
+                        help='Path to a checkpoint file to resume training from.')
+                        
     args = parser.parse_args()
     
     # 2. Call the training function with parsed arguments
@@ -219,5 +276,7 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         lr=args.lr,
         div2k_hr_path=args.path,
-        num_workers=args.num_workers
+        num_workers=args.num_workers,
+        dataset_config_path=args.dataset_config,
+        resume_path=args.resume
     )
